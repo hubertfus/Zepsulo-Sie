@@ -3,12 +3,14 @@ from tkinter import ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 from sensor_simulator import SensorSimulator
+from machine_controller import MachineController
 import traceback
+import threading
 
 class SensorTogglePanel:
     def __init__(self, root):
         self.root = root
-        self.root.title("Machine panel")
+        self.root.title("Machine Panel")
 
         self.sensors = [
             'footfall', 'tempMode', 'AQ', 'USS',
@@ -22,15 +24,27 @@ class SensorTogglePanel:
         self.graph_lines = {}
         self.canvas_widgets = {}
         self.warning_lights = {}
-        self.warning_states = {}
-        self.warning_blinking = {}
+        self.warning_states = {sensor: False for sensor in self.sensors}
+        self.warning_blinking = {sensor: False for sensor in self.sensors}
         self.machine_running = False
         self.detail_windows = {}
+        self.failure_prob = 0.0
 
-        self.control_frame = tk.Frame(root)
+        self.machine_controller = MachineController()
+        self.machine_controller.read_sensors = self.get_current_sensor_data
+
+        self.setup_ui()
+
+        self.simulator = SensorSimulator('sensor_data.csv')
+        self.sensor_objects = self.simulator.sensors
+
+        self.root.after(300, self.update_live_data)
+
+    def setup_ui(self):
+        self.control_frame = tk.Frame(self.root)
         self.control_frame.pack(side="left", padx=10, pady=10, anchor="n")
 
-        self.graph_container = tk.Frame(root)
+        self.graph_container = tk.Frame(self.root)
         self.graph_container.pack(side="right", fill="both", expand=True)
 
         self.canvas = tk.Canvas(self.graph_container)
@@ -44,35 +58,45 @@ class SensorTogglePanel:
         self.scrollbar.pack(side="right", fill="y")
 
         for i, sensor in enumerate(self.sensors):
-            tk.Label(self.control_frame, text=sensor, font=("Arial", 10)).grid(row=i, column=0, padx=5, pady=5, sticky="w")
+            tk.Label(self.control_frame, text=sensor, font=("Arial", 10)).grid(row=i, column=0, padx=5, pady=5,
+                                                                               sticky="w")
+
             value_label = tk.Label(self.control_frame, text="—", font=("Arial", 10))
             value_label.grid(row=i, column=1, padx=5, pady=5)
             self.value_labels[sensor] = value_label
-            tk.Button(self.control_frame, text="Szczegóły", command=lambda s=sensor: self.open_sensor_detail_view(s)).grid(row=i, column=2, padx=5, pady=5)
+
+            tk.Button(self.control_frame, text="Details",
+                      command=lambda s=sensor: self.open_sensor_detail_view(s)).grid(row=i, column=2, padx=5, pady=5)
 
             warning_light = tk.Canvas(self.control_frame, width=20, height=20, bg="white", highlightthickness=0)
             warning_light.grid(row=i, column=3, padx=5, pady=5)
             warning_circle = warning_light.create_oval(5, 5, 15, 15, fill="green")
             self.warning_lights[sensor] = (warning_light, warning_circle)
-            self.warning_states[sensor] = False
-            self.warning_blinking[sensor] = False
 
-        tk.Label(self.control_frame, text="fail", font=("Arial", 10)).grid(row=len(self.sensors), column=0, padx=5, pady=5, sticky="w")
-        self.fail_value = tk.IntVar(value=0)
+        tk.Label(self.control_frame, text="Failure Risk", font=("Arial", 10)).grid(
+            row=len(self.sensors), column=0, padx=5, pady=5, sticky="w")
+
+        self.failure_prob_label = tk.Label(self.control_frame, text="0.00%", font=("Arial", 10))
+        self.failure_prob_label.grid(row=len(self.sensors), column=1, padx=5, pady=5)
+
         self.fail_light = tk.Canvas(self.control_frame, width=20, height=20, bg="white", highlightthickness=0)
-        self.fail_light.grid(row=len(self.sensors), column=1, padx=5, pady=5)
+        self.fail_light.grid(row=len(self.sensors), column=2, padx=5, pady=5)
         self.fail_circle = self.fail_light.create_oval(5, 5, 15, 15, fill="gray")
-        self.update_fail_light()
 
-        tk.Label(self.control_frame, text="Status maszyny", font=("Arial", 10)).grid(row=len(self.sensors)+1, column=0, padx=5, pady=5, sticky="w")
+        tk.Label(self.control_frame, text="Machine Status", font=("Arial", 10)).grid(
+            row=len(self.sensors) + 1, column=0, padx=5, pady=5, sticky="w")
+
         self.status_light = tk.Canvas(self.control_frame, width=20, height=20, bg="white", highlightthickness=0)
-        self.status_light.grid(row=len(self.sensors)+1, column=1, padx=5, pady=5)
-        self.status_circle = self.status_light.create_oval(5, 5, 15, 15, fill="green")
+        self.status_light.grid(row=len(self.sensors) + 1, column=1, padx=5, pady=5)
+        self.status_circle = self.status_light.create_oval(5, 5, 15, 15, fill="gray")
 
-        tk.Button(self.control_frame, text="Pokaż wszystkie wykresy", command=self.show_all_plots).grid(row=len(self.sensors)+2, column=0, columnspan=3, pady=5)
+        tk.Button(self.control_frame, text="Show All Plots", command=self.show_all_plots).grid(
+            row=len(self.sensors) + 2, column=0, columnspan=3, pady=5)
 
-        self.toggle_button = tk.Button(self.control_frame, text="Włącz maszynę", command=self.toggle_machine, bg="green", fg="white")
-        self.toggle_button.grid(row=len(self.sensors)+3, column=0, columnspan=3, pady=5)
+        self.toggle_button = tk.Button(
+            self.control_frame, text="Start Machine",
+            command=self.toggle_machine, bg="green", fg="white")
+        self.toggle_button.grid(row=len(self.sensors) + 3, column=0, columnspan=3, pady=5)
 
         for sensor in self.sensors:
             fig, ax = plt.subplots(figsize=(4, 2.5))
@@ -84,106 +108,66 @@ class SensorTogglePanel:
             self.graph_lines[sensor] = line
 
         self.show_all_plots()
-        self.simulator = SensorSimulator('sensor_data.csv')
-        self.sensor_objects = self.simulator.sensors
-        self.root.after(300, self.update_live_data)
 
-    def open_sensor_detail_view(self, sensor):
-        if sensor in self.detail_windows:
-            self.detail_windows[sensor].lift()
-            return
-
-        window = tk.Toplevel(self.root)
-        self.detail_windows[sensor] = window
-        window.title(f"Szczegóły: {sensor}")
-        window.protocol("WM_DELETE_WINDOW", lambda: self.detail_windows.pop(sensor, None) or window.destroy())
-
-        fig = self.figures[sensor]
-        canvas = FigureCanvasTkAgg(fig, master=window)
-        canvas.draw()
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.pack(padx=10, pady=10)
-        self.canvas_widgets[sensor + '_detail'] = canvas
-
-        sensor_obj = self.sensor_objects.get(sensor)
-        if hasattr(sensor_obj, 'min_value') and hasattr(sensor_obj, 'max_value'):
-            min_var = tk.DoubleVar(value=sensor_obj.min_value)
-            max_var = tk.DoubleVar(value=sensor_obj.max_value)
-
-            frame = tk.Frame(window)
-            frame.pack(pady=10)
-
-            tk.Label(frame, text="Min:").grid(row=0, column=0, sticky="e")
-            tk.Entry(frame, textvariable=min_var, width=10).grid(row=0, column=1)
-            tk.Label(frame, text="Max:").grid(row=1, column=0, sticky="e")
-            tk.Entry(frame, textvariable=max_var, width=10).grid(row=1, column=1)
-
-            def save_changes():
-                sensor_obj.min_value = min_var.get()
-                sensor_obj.max_value = max_var.get()
-                window.destroy()
-                self.detail_windows.pop(sensor, None)
-
-            tk.Button(window, text="Zapisz", command=save_changes).pack(pady=5)
+    def get_current_sensor_data(self):
+        return {
+            'footfall': self.data['footfall'][-1] if self.data['footfall'] else 0,
+            'tempMode': self.data['tempMode'][-1] if self.data['tempMode'] else 0,
+            'AQ': self.data['AQ'][-1] if self.data['AQ'] else 0,
+            'USS': self.data['USS'][-1] if self.data['USS'] else 0,
+            'CS': self.data['CS'][-1] if self.data['CS'] else 0,
+            'VOC': self.data['VOC'][-1] if self.data['VOC'] else 0,
+            'RP': self.data['RP'][-1] if self.data['RP'] else 0,
+            'IP': self.data['IP'][-1] if self.data['IP'] else 0,
+            'Temperature': self.data['Temperature'][-1] if self.data['Temperature'] else 0
+        }
 
     def toggle_machine(self):
         self.machine_running = not self.machine_running
         self.update_status_light()
+
         if self.machine_running:
-            self.toggle_button.config(text="Wyłącz maszynę", bg="black", fg="white")
+            self.toggle_button.config(text="Stop Machine", bg="red", fg="white")
+            machine_thread = threading.Thread(
+                target=self.machine_controller.start_machine,
+                daemon=True)
+            machine_thread.start()
         else:
-            self.toggle_button.config(text="Włącz maszynę", bg="darkgreen", fg="white")
-
-    def set_fail(self, value: int):
-        self.fail_value.set(value)
-        self.update_fail_light()
-
-    def update_fail_light(self):
-        color = "red" if self.fail_value.get() == 1 else "gray"
-        self.fail_light.itemconfig(self.fail_circle, fill=color)
+            self.toggle_button.config(text="Start Machine", bg="green", fg="white")
+            self.machine_controller.stop_machine()
 
     def update_status_light(self):
-        color = "green" if self.machine_running else "gray"
+        if not self.machine_running:
+            color = "gray"
+        elif self.machine_controller.is_paused:
+            color = "red"
+        else:
+            color = "green"
+
         self.status_light.itemconfig(self.status_circle, fill=color)
-
-    def clear_graphs(self):
-        for widget in self.scrollable_frame.winfo_children():
-            widget.destroy()
-        self.canvas_widgets.clear()
-
-    def show_all_plots(self):
-        self.clear_graphs()
-        for idx, sensor in enumerate(self.sensors):
-            row = idx // 2
-            col = idx % 2
-            canvas = FigureCanvasTkAgg(self.figures[sensor], master=self.scrollable_frame)
-            canvas.draw()
-            widget = canvas.get_tk_widget()
-            widget.grid(row=row, column=col, padx=10, pady=10)
-            self.canvas_widgets[sensor] = canvas
-
-    def show_single_plot(self, sensor):
-        self.clear_graphs()
-        canvas = FigureCanvasTkAgg(self.figures[sensor], master=self.scrollable_frame)
-        canvas.draw()
-        widget = canvas.get_tk_widget()
-        widget.pack(padx=10, pady=10)
-        self.canvas_widgets[sensor] = canvas
 
     def update_live_data(self):
         try:
             if self.machine_running:
                 row = self.simulator.get_next_reading()
+
                 for sensor in self.sensors:
                     value = row[sensor]
                     self.append_sensor_value(sensor, value)
-                    self.value_labels[sensor].config(text=f"{value:.2f}" if isinstance(value, float) else str(value))
+                    self.value_labels[sensor].config(
+                        text=f"{value:.2f}" if isinstance(value, float) else str(value))
                     self.update_warning_light(sensor)
-                self.set_fail(int(row['fail']))
-            else:
-                self.simulate_shutdown_step()
+
+                self.failure_prob = self.machine_controller.ml_model.predict_failure(
+                    self.get_current_sensor_data())
+                self.failure_prob_label.config(text=f"{self.failure_prob:.2f}%")
+
+                self.fail_light.itemconfig(
+                    self.fail_circle,
+                    fill="red" if self.failure_prob > 70 else "gray")
+
         except Exception as e:
-            print(f"Błąd symulacji: {e}")
+            print(f"Simulation error: {e}")
             traceback.print_exc()
 
         self.update_status_light()
@@ -209,27 +193,6 @@ class SensorTogglePanel:
             self.canvas_widgets[sensor].draw()
         if sensor + '_detail' in self.canvas_widgets:
             self.canvas_widgets[sensor + '_detail'].draw()
-
-    def simulate_shutdown_step(self):
-        dynamic_sensors = ['USS', 'CS', 'RP', 'IP', 'Temperature']
-        all_off = True
-
-        for sensor in dynamic_sensors:
-            if sensor in self.sensor_objects:
-                obj = self.sensor_objects[sensor]
-                prev = obj.get_value()
-                obj.simulate_shutdown()
-                new = obj.get_value()
-
-                self.append_sensor_value(sensor, new)
-                self.value_labels[sensor].config(text=f"{new:.1f}")
-                self.update_warning_light(sensor)
-
-                if new > (obj.min_value or 0) + 0.5:
-                    all_off = False
-
-        if all_off:
-            print("Maszyna całkowicie wyłączona.")
 
     def update_warning_light(self, sensor):
         sensor_obj = self.sensor_objects.get(sensor)
@@ -258,6 +221,37 @@ class SensorTogglePanel:
         canvas, circle = self.warning_lights[sensor]
         canvas.itemconfig(circle, fill=new_color)
         self.root.after(500, lambda: self.toggle_warning_light(sensor))
+
+    def open_sensor_detail_view(self, sensor):
+        if sensor in self.detail_windows:
+            self.detail_windows[sensor].lift()
+            return
+
+        window = tk.Toplevel(self.root)
+        self.detail_windows[sensor] = window
+        window.title(f"Sensor Details: {sensor}")
+        window.protocol("WM_DELETE_WINDOW", lambda: self.detail_windows.pop(sensor, None) or window.destroy())
+
+        fig = self.figures[sensor]
+        canvas = FigureCanvasTkAgg(fig, master=window)
+        canvas.draw()
+        canvas.get_tk_widget().pack(padx=10, pady=10)
+
+    def show_all_plots(self):
+        self.clear_graphs()
+        for idx, sensor in enumerate(self.sensors):
+            row = idx // 2
+            col = idx % 2
+            canvas = FigureCanvasTkAgg(self.figures[sensor], master=self.scrollable_frame)
+            canvas.draw()
+            widget = canvas.get_tk_widget()
+            widget.grid(row=row, column=col, padx=10, pady=10)
+            self.canvas_widgets[sensor] = canvas
+
+    def clear_graphs(self):
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+        self.canvas_widgets.clear()
 
 
 if __name__ == "__main__":
